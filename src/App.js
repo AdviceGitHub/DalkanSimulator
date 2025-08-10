@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { ChevronDown, MapPin, Car, BatteryCharging, CheckCircle, XCircle, Clock, FileDown, ArrowLeft, Calendar as CalendarIcon, AlertTriangle } from 'lucide-react';
+import { Wrapper, Status } from '@googlemaps/react-wrapper';
 
 // --- API Configuration ---
 const API_BASE_URL = 'https://nx-api.info/api/bi/external';
 const API_TOKEN = process.env.REACT_APP_API_TOKEN;
+const GOOGLE_MAPS_API_KEY = process.env.REACT_APP_GOOGLE_MAPS_API_KEY;
 
 // Mocked data for chargers, as there is no API endpoint for it.
 const MOCKED_CHARGERS = [
@@ -248,8 +250,28 @@ const Dashboard = ({ cars, chargers, selectedCar, selectedCharger, radius, check
           />
         </div>
         <div>
-          <label htmlFor="radius" className="block text-sm font-medium text-gray-600 mb-2">רדיוס אימות (מטרים): <span className="font-bold text-blue-600">{radius} מ'</span></label>
-          <input type="range" id="radius" min="10" max="8000" step="50" value={radius} onChange={(e) => onRadiusChange(Number(e.target.value))} className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" />
+          <label htmlFor="radius" className="block text-sm font-medium text-gray-600 mb-2">
+            רדיוס אימות (מטרים): <span className="font-bold text-blue-600">{radius} מ'</span>
+            {selectedCar && selectedCharger && carDetails && (
+              <span className="block text-xs text-gray-500 mt-1">
+                מרחק נוכחי: {Math.round(getDistanceInMeters(carDetails.lat, carDetails.lng, selectedCharger.location_geo.lat, selectedCharger.location_geo.lng))} מ'
+              </span>
+            )}
+          </label>
+          <input 
+            type="range" 
+            id="radius" 
+            min="10" 
+            max="8000" 
+            step="50" 
+            value={radius} 
+            onChange={(e) => onRadiusChange(Number(e.target.value))} 
+            className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+          />
+          <div className="flex justify-between text-xs text-gray-500 mt-1">
+            <span>10 מ'</span>
+            <span>8000 מ'</span>
+          </div>
         </div>
         <div className="space-y-3 pt-4 border-t">
           <button onClick={onCheck} disabled={!selectedCar || !selectedCharger || isChecking} className="w-full flex justify-center items-center bg-blue-600 text-white font-semibold py-3 px-4 rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors duration-300">
@@ -261,6 +283,31 @@ const Dashboard = ({ cars, chargers, selectedCar, selectedCharger, radius, check
         </div>
       </div>
       <div className="lg:col-span-2 space-y-8">
+        {selectedCar && selectedCharger && carDetails && (
+          <div className={`p-4 rounded-xl border-2 ${
+            getDistanceInMeters(carDetails.lat, carDetails.lng, selectedCharger.location_geo.lat, selectedCharger.location_geo.lng) <= radius 
+              ? 'bg-green-50 border-green-200' 
+              : 'bg-orange-50 border-orange-200'
+          }`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center">
+                {getDistanceInMeters(carDetails.lat, carDetails.lng, selectedCharger.location_geo.lat, selectedCharger.location_geo.lng) <= radius ? (
+                  <CheckCircle className="w-6 h-6 text-green-500 ml-2" />
+                ) : (
+                  <AlertTriangle className="w-6 h-6 text-orange-500 ml-2" />
+                )}
+                <span className="font-semibold">
+                  {getDistanceInMeters(carDetails.lat, carDetails.lng, selectedCharger.location_geo.lat, selectedCharger.location_geo.lng) <= radius 
+                    ? 'הרכב בטווח המותר' 
+                    : 'הרכב מחוץ לטווח'}
+                </span>
+              </div>
+              <div className="text-sm text-gray-600">
+                {Math.round(getDistanceInMeters(carDetails.lat, carDetails.lng, selectedCharger.location_geo.lat, selectedCharger.location_geo.lng))} מ' / {radius} מ'
+              </div>
+            </div>
+          </div>
+        )}
         {checkResult && <ResultCard result={checkResult} />}
         <div className="bg-white p-6 rounded-xl shadow-md">
           <h2 className="text-xl font-semibold text-gray-700 mb-4">מפת מיקומים</h2>
@@ -327,43 +374,222 @@ const ResultCard = ({ result }) => {
   );
 };
 
-// Map Display Component - Reverted to original simulation
-const MapDisplay = ({ carDetails, charger, radius }) => {
-    const mapContainerStyle = {
-        width: '100%',
-        height: '400px',
-        borderRadius: '0.75rem',
-        backgroundColor: '#e9ecef',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        position: 'relative',
-        overflow: 'hidden'
+// Google Map Component
+const GoogleMap = ({ carDetails, charger, radius }) => {
+  const mapRef = React.useRef(null);
+  const [map, setMap] = React.useState(null);
+  const markersRef = React.useRef({ car: null, charger: null, radiusCircle: null });
+
+  React.useEffect(() => {
+    if (mapRef.current && !map) {
+      // Center map on Israel (Tel Aviv area) as default
+      const center = carDetails && charger 
+        ? { lat: (carDetails.lat + charger.location_geo.lat) / 2, lng: (carDetails.lng + charger.location_geo.lng) / 2 }
+        : { lat: 32.0853, lng: 34.7818 }; // Tel Aviv
+
+      const googleMap = new window.google.maps.Map(mapRef.current, {
+        center,
+        zoom: carDetails && charger ? 15 : 10,
+        language: 'he', // Hebrew language
+        region: 'IL', // Israel region
+        mapTypeControl: true,
+        streetViewControl: true,
+        fullscreenControl: true,
+        styles: [
+          {
+            featureType: "all",
+            elementType: "labels.text",
+            stylers: [
+              { visibility: "on" }
+            ]
+          }
+        ]
+      });
+
+      setMap(googleMap);
+    }
+  }, [mapRef, map]);
+
+  React.useEffect(() => {
+    if (map && carDetails && charger) {
+      // Clear existing markers
+      if (markersRef.current.car) markersRef.current.car.setMap(null);
+      if (markersRef.current.charger) markersRef.current.charger.setMap(null);
+      if (markersRef.current.radiusCircle) markersRef.current.radiusCircle.setMap(null);
+
+      // Car marker
+      const carMarker = new window.google.maps.Marker({
+        position: { lat: carDetails.lat, lng: carDetails.lng },
+        map: map,
+        title: `רכב ${carDetails.car_number}`,
+        icon: {
+          path: window.google.maps.SymbolPath.CIRCLE,
+          scale: 12,
+          fillColor: '#3B82F6',
+          fillOpacity: 1,
+          strokeColor: '#1E40AF',
+          strokeWeight: 3,
+        }
+      });
+
+      // Charger marker
+      const chargerMarker = new window.google.maps.Marker({
+        position: charger.location_geo,
+        map: map,
+        title: `${charger.name} - ${charger.address}`,
+        icon: {
+          path: window.google.maps.SymbolPath.CIRCLE,
+          scale: 10,
+          fillColor: '#F59E0B',
+          fillOpacity: 1,
+          strokeColor: '#D97706',
+          strokeWeight: 3,
+        }
+      });
+
+      // Radius circle - this will update when radius changes
+      const radiusCircle = new window.google.maps.Circle({
+        strokeColor: '#10B981',
+        strokeOpacity: 0.8,
+        strokeWeight: 2,
+        fillColor: '#10B981',
+        fillOpacity: 0.15,
+        map: map,
+        center: charger.location_geo,
+        radius: radius, // radius in meters
+      });
+
+      // Store references for cleanup
+      markersRef.current = { car: carMarker, charger: chargerMarker, radiusCircle: radiusCircle };
+
+      // Info windows
+      const carInfoWindow = new window.google.maps.InfoWindow({
+        content: `
+          <div style="direction: rtl; font-family: Arial; min-width: 200px;">
+            <h3 style="color: #1E40AF; margin: 0 0 10px 0;">🚗 רכב ${carDetails.car_number}</h3>
+            <p style="margin: 5px 0;"><strong>מיקום:</strong> ${carDetails.lat.toFixed(6)}, ${carDetails.lng.toFixed(6)}</p>
+            <p style="margin: 5px 0; color: #059669;"><strong>רדיוס נוכחי:</strong> ${radius} מטר</p>
+          </div>
+        `
+      });
+
+      const chargerInfoWindow = new window.google.maps.InfoWindow({
+        content: `
+          <div style="direction: rtl; font-family: Arial; min-width: 200px;">
+            <h3 style="color: #D97706; margin: 0 0 10px 0;">🔌 ${charger.name}</h3>
+            <p style="margin: 5px 0;"><strong>כתובת:</strong> ${charger.address}</p>
+            <p style="margin: 5px 0;"><strong>מיקום:</strong> ${charger.location_geo.lat.toFixed(6)}, ${charger.location_geo.lng.toFixed(6)}</p>
+            <p style="margin: 5px 0; color: #059669;"><strong>רדיוס אימות:</strong> ${radius} מטר</p>
+          </div>
+        `
+      });
+
+      carMarker.addListener('click', () => {
+        chargerInfoWindow.close();
+        carInfoWindow.open(map, carMarker);
+      });
+
+      chargerMarker.addListener('click', () => {
+        carInfoWindow.close();
+        chargerInfoWindow.open(map, chargerMarker);
+      });
+
+      // Auto-fit map to show both markers and radius
+      const bounds = new window.google.maps.LatLngBounds();
+      bounds.extend({ lat: carDetails.lat, lng: carDetails.lng });
+      bounds.extend(charger.location_geo);
+      
+      // Extend bounds to include radius circle
+      const radiusInDegrees = radius / 111320; // rough conversion from meters to degrees
+      bounds.extend({
+        lat: charger.location_geo.lat + radiusInDegrees,
+        lng: charger.location_geo.lng + radiusInDegrees
+      });
+      bounds.extend({
+        lat: charger.location_geo.lat - radiusInDegrees,
+        lng: charger.location_geo.lng - radiusInDegrees
+      });
+      
+      map.fitBounds(bounds);
+
+      // Add some padding and ensure reasonable zoom
+      const listener = window.google.maps.event.addListener(map, 'idle', () => {
+        if (map.getZoom() > 18) map.setZoom(18);
+        if (map.getZoom() < 10) map.setZoom(10);
+        window.google.maps.event.removeListener(listener);
+      });
+    }
+  }, [map, carDetails, charger, radius]); // Added radius to dependency array
+
+  // Cleanup on unmount
+  React.useEffect(() => {
+    return () => {
+      if (markersRef.current.car) markersRef.current.car.setMap(null);
+      if (markersRef.current.charger) markersRef.current.charger.setMap(null);
+      if (markersRef.current.radiusCircle) markersRef.current.radiusCircle.setMap(null);
     };
-    const hasData = carDetails && charger;
+  }, []);
+
+  return <div ref={mapRef} style={{ width: '100%', height: '400px', borderRadius: '0.75rem' }} />;
+};
+
+// Map Display Component with Google Maps
+const MapDisplay = ({ carDetails, charger, radius }) => {
+  if (!GOOGLE_MAPS_API_KEY) {
     return (
-        <div style={mapContainerStyle}>
-            {!hasData && <p className="text-gray-500">בחר רכב ומטען ולחץ "ודא סמיכות" להצגת מיקומים.</p>}
-            {hasData && (
-                <div className="w-full h-full relative p-4 text-right">
-                    <p className="absolute top-2 right-2 text-xs bg-white/70 p-1 rounded">תצוגת מפה (סימולציה)</p>
-                    <div className="absolute" style={{ top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}>
-                        <MapPin className="w-8 h-8 text-orange-500" />
-                        <span className="text-xs bg-white px-1 rounded -translate-y-6 -translate-x-4 absolute">מטען</span>
-                    </div>
-                    <div className="absolute" style={{ top: '40%', left: '60%', transform: 'translate(-50%, -50%)' }}>
-                        <Car className="w-8 h-8 text-blue-600" />
-                        <span className="text-xs bg-white px-1 rounded -translate-y-6 -translate-x-2 absolute">רכב</span>
-                    </div>
-                    <div className="absolute border-2 border-dashed border-green-500 rounded-full" style={{ top: '50%', left: '50%', width: `${radius/2}px`, height: `${radius/2}px`, transform: 'translate(-50%, -50%)' }}></div>
-                    <div className="absolute bottom-2 right-2 text-xs bg-white/70 p-1 rounded">
-                        <p><strong>מיקום רכב:</strong> {carDetails.lat}, {carDetails.lng}</p>
-                        <p><strong>מיקום מטען:</strong> {charger.address}</p>
-                    </div>
-                </div>
-            )}
+      <div className="w-full h-96 bg-yellow-50 border-2 border-yellow-200 rounded-xl flex items-center justify-center">
+        <div className="text-center p-6">
+          <AlertTriangle className="w-12 h-12 text-yellow-500 mx-auto mb-4" />
+          <h3 className="text-lg font-semibold text-yellow-800 mb-2">Google Maps API Key חסר</h3>
+          <p className="text-yellow-700">אנא הוסף את REACT_APP_GOOGLE_MAPS_API_KEY לקובץ .env</p>
         </div>
+      </div>
     );
+  }
+
+  const hasData = carDetails && charger;
+
+  const render = (status) => {
+    switch (status) {
+      case Status.LOADING:
+        return (
+          <div className="w-full h-96 bg-gray-100 rounded-xl flex items-center justify-center">
+            <div className="text-center">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-4"></div>
+              <p className="text-gray-500">טוען מפה...</p>
+            </div>
+          </div>
+        );
+      case Status.FAILURE:
+        return (
+          <div className="w-full h-96 bg-red-50 border-2 border-red-200 rounded-xl flex items-center justify-center">
+            <div className="text-center p-6">
+              <XCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
+              <h3 className="text-lg font-semibold text-red-800 mb-2">שגיאה בטעינת המפה</h3>
+              <p className="text-red-700">בדוק את מפתח Google Maps API או חיבור האינטרנט</p>
+            </div>
+          </div>
+        );
+      default:
+        return hasData ? (
+          <GoogleMap carDetails={carDetails} charger={charger} radius={radius} />
+        ) : (
+          <div className="w-full h-96 bg-gray-100 rounded-xl flex items-center justify-center">
+            <p className="text-gray-500">בחר רכב ומטען ולחץ "ודא סמיכות" להצגת מיקומים במפה.</p>
+          </div>
+        );
+    }
+  };
+
+  return (
+    <Wrapper 
+      apiKey={GOOGLE_MAPS_API_KEY} 
+      render={render}
+      libraries={['places']}
+      language="he"
+      region="IL"
+    />
+  );
 };
 
 // History Screen Component
